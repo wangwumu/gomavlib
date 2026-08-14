@@ -490,3 +490,32 @@ func TestReaderErrorSignatureTimestamp(t *testing.T) {
 	_, err = reader.Read()
 	require.EqualError(t, err, "signature timestamp is too old")
 }
+
+// TestReaderDeviceIDIncompatFlag 验证 deviceID4b 补丁：非零偶数 incompatFlag（deviceID 高位）
+// 不再被拒绝，帧正常解析。
+func TestReaderDeviceIDIncompatFlag(t *testing.T) {
+	f := &V2Frame{
+		IncompatibilityFlag: 0x02, // deviceID[31:24] 非零偶数
+		CompatibilityFlag:   0x01, // deviceID[23:16]
+		SequenceNumber:      0x03,
+		SystemID:            0x04,
+		ComponentID:         0x05,
+		Message: &message.MessageRaw{
+			ID:      50000, // 不在 dialect，保持 MessageRaw
+			Payload: []byte{0xAA, 0xBB, 0xCC, 0xDD},
+		},
+		Checksum: 0,
+	}
+
+	var buf bytes.Buffer
+	w := &Writer{ByteWriter: &buf, DialectRW: testDialectRW}
+	require.NoError(t, w.Initialize())
+	require.NoError(t, w.Write(f))
+
+	r := &Reader{BufByteReader: bufio.NewReaderSize(bytes.NewReader(buf.Bytes()), bufferSize), DialectRW: testDialectRW}
+	require.NoError(t, r.Initialize())
+
+	fr, err := r.Read()
+	require.NoError(t, err)
+	require.Equal(t, f, fr)
+}

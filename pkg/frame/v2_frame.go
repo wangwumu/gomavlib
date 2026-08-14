@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/binary"
-	"fmt"
 	"io"
 
 	"github.com/bluenviron/gomavlib/v4/pkg/message"
@@ -167,10 +166,10 @@ func (f *V2Frame) unmarshal(br *bufio.Reader) error {
 	f.ComponentID = buf[5]
 	msgID := uint24Decode(buf[6:])
 
-	// discard frame if incompatibility flag is not understood, as in recommendations
-	if f.IncompatibilityFlag != 0 && f.IncompatibilityFlag != V2FlagSigned {
-		return fmt.Errorf("unknown incompatibility flag: %d", f.IncompatibilityFlag)
-	}
+	// 设备标识改造（deviceID4b）：帧头 incompatFlag 字节被复用为 deviceID[31:24]，
+	// 可为任意值（约束仅 bit0=0 避免误判为签名帧，由设备ID分配保证）。
+	// 因此不再拒绝非 0/0x01 的 incompatFlag；签名判断仍由 IsSigned()（bit0）负责。
+	// （上游原逻辑：incompatFlag != 0 && != V2FlagSigned 时返回 error，已移除）
 
 	// message
 	var msgEncoded []byte
