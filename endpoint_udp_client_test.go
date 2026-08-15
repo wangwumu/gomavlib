@@ -141,7 +141,9 @@ func TestEndpointUDPClientDatagramRecovery(t *testing.T) {
 		_, err2 = pc.WriteTo([]byte{frame.V2MagicByte}, clientAddr)
 		require.NoError(t, err2)
 
-		// second malformed packet (unknown incompatibility flag, with trailing payload+checksum bytes
+		// second bad packet: incompat=0x04 is now a legitimate deviceID high byte
+		// (docs/10 §1.4 + docs/11 — parser no longer rejects incompat bit1~7, only bit0
+		// SIGNED check remains). The frame parses normally and fails on a wrong checksum.
 		_, err2 = pc.WriteTo([]byte{frame.V2MagicByte, 5, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, clientAddr)
 		require.NoError(t, err2)
 
@@ -197,12 +199,11 @@ func TestEndpointUDPClientDatagramRecovery(t *testing.T) {
 	evt = <-node.Events()
 	parseErr, ok = evt.(*EventParseError)
 	require.True(t, ok)
-	require.EqualError(t, parseErr.Error, "unknown incompatibility flag: 4")
+	require.EqualError(t, parseErr.Error, "wrong checksum, expected 42c9, got 0000, message id is 0")
 
-	evt = <-node.Events()
-	parseErr, ok = evt.(*EventParseError)
-	require.True(t, ok)
-	require.EqualError(t, parseErr.Error, "skipped 7 bytes")
+	// 注：旧行为下 incompat 高位被拒导致帧头后 7 字节残留产生 "skipped 7 bytes" 事件；
+	// 新协议（docs/10 §1.4）放行 incompat bit1~7 后整帧被完整消费，不再有该跳过事件，
+	// 下一事件直接是 packet 3 的合法帧。
 
 	evt = <-node.Events()
 	fr, ok := evt.(*EventFrame)
