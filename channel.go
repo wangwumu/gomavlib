@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"sync/atomic"
+	"time"
 
 	"github.com/bluenviron/gomavlib/v4/pkg/frame"
 	"github.com/bluenviron/gomavlib/v4/pkg/message"
@@ -79,6 +82,16 @@ type Channel struct {
 
 	// in
 	chWrite chan any
+
+	// write-queue observability. chWrite is deliberately non-blocking (a slow
+	// consumer must not stall the node), so a full queue loses data unless it
+	// is counted. Only the "queue full" branch is counted: frames discarded
+	// because the channel is already closing (ctx done) are not, and writes
+	// that land in chWrite after runWriter exited are not drained nor counted.
+	// Counters are atomic: write() is called from the node goroutine while
+	// DroppedFrames() may be read from anywhere.
+	dropped     atomic.Uint64
+	lastDropLog atomic.Int64 // unix nanos of the last "queue full" log
 
 	// out
 	done chan struct{}
@@ -255,18 +268,33 @@ func (ch *Channel) runWriter(writerTerminate chan struct{}) error {
 				if err != nil {
 					return err
 				}
+				ch.paceDatagram()
 
 			case frame.Frame:
 				err := ch.frameReadWriter.Write(wh)
 				if err != nil {
 					return err
 				}
+				ch.paceDatagram()
 			}
 
 		case <-writerTerminate:
 			return nil
 		}
 	}
+}
+
+// paceDatagram keeps consecutive datagrams on the same channel from being
+// handed to the kernel back-to-back. runtime.Gosched is not enough here: it
+// does not guarantee that any time passes, so it gives the network stack no
+// chance to drain the socket buffer. A message or frame write produces exactly
+// one datagram on datagram-based endpoints; on stream-based endpoints there is
+// no packet boundary to pace.
+func (ch *Channel) paceDatagram() {
+	if ch.node.WriteDelay <= 0 || !ch.isDatagram {
+		return
+	}
+	time.Sleep(ch.node.WriteDelay)
 }
 
 // String implements fmt.Stringer.
@@ -279,10 +307,27 @@ func (ch *Channel) Endpoint() Endpoint {
 	return ch.endpoint
 }
 
+// dropLogInterval 是「写队列满」告警的节流窗口。遥测突发时可能每帧都丢，
+// 逐帧打印只会淹没日志；计数仍然逐帧累加，可从 DroppedFrames() 读到真实值。
+const dropLogInterval = 5 * time.Second
+
 func (ch *Channel) write(what any) {
 	select {
 	case ch.chWrite <- what:
 	case <-ch.ctx.Done():
 	default: // buffer is full
+		n := ch.dropped.Add(1)
+		now := time.Now().UnixNano()
+		last := ch.lastDropLog.Load()
+		if now-last >= int64(dropLogInterval) && ch.lastDropLog.CompareAndSwap(last, now) {
+			log.Printf("WARN: gomavlib: %s write queue full (cap %d), dropping frames (total dropped %d)",
+				ch.label, writeBufferSize, n)
+		}
 	}
+}
+
+// DroppedFrames returns how many frames this channel has dropped because its
+// write queue was full. The counter never decreases for the channel's lifetime.
+func (ch *Channel) DroppedFrames() uint64 {
+	return ch.dropped.Load()
 }

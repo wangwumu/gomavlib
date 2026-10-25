@@ -90,6 +90,14 @@ type Node struct {
 	// (optional) timeout before closing idle connections.
 	// It defaults to 60 seconds.
 	IdleTimeout time.Duration
+	// (optional) wait after each written datagram on datagram-based endpoints
+	// (UDP), so consecutive packets are not handed to the kernel back-to-back.
+	// It applies in the per-channel writer goroutine, so it never blocks the
+	// event loop, and it has no effect on stream-based endpoints, where one
+	// Write is not one packet.
+	// time.Sleep rounds up: a 1µs request typically sleeps tens of microseconds
+	// on Linux. It defaults to 0 (disabled).
+	WriteDelay time.Duration
 
 	//
 	// private
